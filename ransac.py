@@ -1,17 +1,8 @@
-from os.path import curdir, join, isdir
-from os import mkdir
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
-from init import Dataset, IDList
-from sklearn import linear_model
-
-# TODO: implement MyRANSACRegressor
-# * eps — iterval for inliers
-# * weight() — weight function for inlier
-# * adaptive interval — eps is ignored
-# * parameters of adaptive interval (median, quantile, std, etc)
+from json import dump
 
 
 def make_hist(x, y, k, hist_path):
@@ -61,35 +52,18 @@ def graph_roc_curves(dataset, estimators):
     plt.savefig(dataset.roc_path, fmt='png', dpi=600)
 
 
-def run_dataset(dataset, estimators):
-    # np.random.seed(17)
+def run_dataset(dataset, estimators, random_state=None):
     cols = ['name', 'temporal_shift', 'angle', 'scale', 'const']
     for estimator_info in estimators:
-        estimator = estimator_info['model']
-        results = pd.DataFrame(columns=cols).set_index('name')
-        for scene_name in dataset.info.index:
-            print(scene_name)
-            scene = dataset.info.loc[scene_name]
-            points = dataset.pts(video_name=scene.video_name)
-
-            X = points.drop('disp_y', axis=1).values
-            y = points.disp_y.values
-
-            estimator.fit(X, y)
-
-            try:
-                coef = estimator.estimator_.coef_
-            except AttributeError:
-                coef = estimator.coef_
-
-            results.loc[scene_name] = pd.Series(coef, index=['temporal_shift', 'angle', 'scale'])
-
-        results.to_csv(dataset.res_path(estimator_info['id']))
+        best_estimator = grid_search(dataset, estimator_info, random_state)
+        best_estimator['results'].to_csv(dataset.res_path(estimator_info['id']))
+        dump({'params': best_estimator['params'], 'AUC': best_estimator['AUC']},
+             open(dataset.prm_path(estimator_info['id']), 'w'), indent=4)
 
 
 def AUC_score(X, y):
     h = 0.01
-    precisions = np.arange(0, 0.52, step=h)
+    precisions = np.arange(0, 1.0 + h, step=h)
     diff = abs(X - y)
     dataset_precisions = np.array([diff[diff <= eps].size / diff.size for eps in precisions])
 
@@ -97,9 +71,11 @@ def AUC_score(X, y):
     return AUC
 
 
+def grid_search(dataset, estimator_info, random_state=None):
+    if random_state:
+        np.random.seed(random_state)
 
-def grid_search(dataset, estimator_info, grid_params):
-    cols = ['name', 'temporal_shift', 'angle', 'scale', 'const']
+    cols = ['name', 'temporal_shift', 'angle', 'scale']
 
     best_estimator = {
         'params' : None,
@@ -110,7 +86,7 @@ def grid_search(dataset, estimator_info, grid_params):
     estimator = estimator_info['model']
 
     for params in estimator_info['grid_params']:
-        estimator.set_params(params)
+        estimator.set_params(**params)
 
         results = pd.DataFrame(columns=cols).set_index('name')
         for scene_name in dataset.info.index:
@@ -121,44 +97,24 @@ def grid_search(dataset, estimator_info, grid_params):
             X = points.drop('disp_y', axis=1).values
             y = points.disp_y.values
 
-            estimator.fit(X, y)
-
             try:
-                coef = estimator.estimator_.coef_
-            except AttributeError:
-                coef = estimator.coef_
+                estimator.fit(X, y)
 
-            results.loc[scene_name] = pd.Series(coef, index=['temporal_shift', 'angle', 'scale'])
+                try:
+                    coef = estimator.estimator_.coef_
+                except AttributeError:
+                    coef = estimator.coef_
 
-        AUC = AUC_score(results.temporal_shift)
+                results.loc[scene_name] = pd.Series(coef, index=['temporal_shift', 'angle', 'scale'])
+
+            except:
+                pass
+
+        AUC = AUC_score(results.temporal_shift, dataset.info['temporal shift'])
+        print(AUC)
         if AUC > best_estimator['AUC']:
-            best_estimator['params'] = params
+            best_estimator['params']  = params
             best_estimator['results'] = results
-            best_estimator['AUC'] = AUC
+            best_estimator['AUC']     = AUC
 
     return best_estimator
-
-
-if __name__ == '__main__':
-
-    estimators = [
-        {
-            'model': linear_model.RANSACRegressor(base_estimator=linear_model.LinearRegression(),
-                                                  residual_threshold=0.5,
-                                                  max_trials=2000,
-                                                  stop_probability=0.999),
-            'id': 'RANSAC, Linear',
-            'color': 'lime'
-        },
-        {
-            'model': linear_model.HuberRegressor(epsilon=1.001,
-                                                 max_iter=2000),
-            'id': 'Huber',
-            'color': 'blue'
-        }
-    ]
-
-    for dataset_id in IDList().id_list:
-        dataset = Dataset(id=dataset_id)
-        run_dataset(dataset, estimators)
-        graph_roc_curves(dataset, estimators)
